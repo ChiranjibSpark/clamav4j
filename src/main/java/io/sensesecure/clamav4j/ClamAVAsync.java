@@ -29,6 +29,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -63,13 +65,23 @@ public class ClamAVAsync implements AutoCloseable {
         this.timeout = timeout;
     }
 
-    public <A> void scan(InputStream inputStream, A attachment, ClamAVAsyncCallback<A> callback) throws IOException {
+    public <A> void scan(InputStream inputStream, A attachment, String s3Location, ClamAVAsyncCallback<A> callback) throws IOException {
         AsynchronousSocketChannel asynchronousSocketChannel = AsynchronousSocketChannel.open(this.asynchronousChannelGroup);
-        asynchronousSocketChannel.connect(this.address, new ClamAVAsyncObject(inputStream, attachment, callback, asynchronousSocketChannel), new ClamAVAsyncObjectCompletionHandlerConnect());
+        asynchronousSocketChannel.connect(this.address, new ClamAVAsyncObject(inputStream, attachment, callback, asynchronousSocketChannel, s3Location), new ClamAVAsyncObjectCompletionHandlerConnect());
     }
     
     public boolean ping() {
         return ClamAV.ping(this.address, this.timeout);
+    }
+
+    public ClamAVVersion getVersion() {
+        return ClamAV.getVersion(this.address, this.timeout);
+    }
+
+    public <A> void sparkScan(InputStream inputStream, String fileAbsPath, String s3Location, ClamAVAsyncCallback callback) throws IOException {
+        if (ping()) {
+            scan(inputStream, fileAbsPath, s3Location, callback);
+        }
     }
 
     @Override
@@ -94,12 +106,14 @@ public class ClamAVAsync implements AutoCloseable {
         protected ByteBuffer data;
         ByteBuffer size = ByteBuffer.allocate(4);
         ByteBuffer read = ByteBuffer.allocate(1024);
+        protected final String s3Location;
 
-        protected ClamAVAsyncObject(InputStream inputStream, A attachment, ClamAVAsyncCallback<A> callback, AsynchronousSocketChannel asynchronousSocketChannel) {
+        protected ClamAVAsyncObject(InputStream inputStream, A attachment, ClamAVAsyncCallback<A> callback, AsynchronousSocketChannel asynchronousSocketChannel, String s3Location) {
             this.inputStream = inputStream;
             this.attachment = attachment;
             this.callback = callback;
             this.asynchronousSocketChannel = asynchronousSocketChannel;
+            this.s3Location = s3Location;
         }
 
         protected void completed(String result) {
@@ -108,7 +122,7 @@ public class ClamAVAsync implements AutoCloseable {
             } catch (IOException ex) {
                 Logger.getLogger(ClamAVAsync.class.getName()).log(Level.SEVERE, null, ex);
             }
-            this.callback.completed(result, attachment, inputStream);
+            this.callback.completed(result, attachment, inputStream, s3Location);
         }
 
         protected void failed(Throwable exc) {
@@ -117,7 +131,7 @@ public class ClamAVAsync implements AutoCloseable {
             } catch (IOException ex) {
                 Logger.getLogger(ClamAVAsync.class.getName()).log(Level.SEVERE, null, ex);
             }
-            this.callback.failed(exc, attachment, inputStream);
+            this.callback.failed(exc, attachment, inputStream, s3Location);
         }
     }
 
@@ -255,6 +269,7 @@ public class ClamAVAsync implements AutoCloseable {
         int timeout = ClamAV.defaultTimeout;
         int port = ClamAV.defaultPort;
         String host = ClamAV.defaultHost;
+        String s3Location = "";
         boolean ping = false;
         for (int index = 0; index < args.length - 1; index++) {
             if ("--host".equals(args[index]) && index + 1 < args.length - 1) {
@@ -266,6 +281,9 @@ public class ClamAVAsync implements AutoCloseable {
             } else if ("--timeout".equals(args[index]) && index + 1 < args.length - 1) {
                 index++;
                 timeout = Integer.parseInt(args[index]);
+            } else if ("--s3Location".equals(args[index]) && index + 1 < args.length - 1) {
+                index++;
+                s3Location = args[index];
             } else if ("--ping".equals(args[index])) {
                 ping = true;
             } else {
@@ -276,34 +294,44 @@ public class ClamAVAsync implements AutoCloseable {
         try (final ClamAVAsync clamAVAsync = new ClamAVAsync(new InetSocketAddress(host, port), timeout)) {
             if (ping || ("--ping".equals(args[args.length - 1]))) {
                 System.out.println(clamAVAsync.getAddress() + ": " + (clamAVAsync.ping() ? "ALIVE" : "DOWN"));
-            } else {
+            } /*else {
                 final Path path = Paths.get(args[args.length - 1]);
+                final String s3LocationF = s3Location;
+                final Map<String, Object> resultMap = new HashMap<>();
                 try {
                     Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
                         @Override
                         public FileVisitResult visitFile(Path path, BasicFileAttributes basicFileAttributes) throws IOException {
                             try {
                                 InputStream inputStream = new FileInputStream(path.toFile());
-                                clamAVAsync.scan(inputStream, path.toString(), new ClamAVAsyncCallback<String>() {
+                                clamAVAsync.sparkScan(inputStream, path.toString(), s3LocationF, new ClamAVAsyncCallback<String>() {
 
                                     @Override
-                                    public void completed(String result, String attachment, InputStream inputStream) {
+                                    public Map<String, Object> completed(String result, String attachment, InputStream inputStream, String s3Location) {
+                                        resultMap.put("result", result);
+                                        resultMap.put("file_path_local", attachment);
+                                        resultMap.put("file_path_s3", s3Location);
                                         System.out.println(attachment + ": " + ("OK".equals(result) ? "OK" : (result + " FOUND")));
                                         try {
                                             inputStream.close();
                                         } catch (IOException ex) {
                                             Logger.getLogger(ClamAVAsync.class.getName()).log(Level.SEVERE, null, ex);
                                         }
+                                        return resultMap;
                                     }
 
                                     @Override
-                                    public void failed(Throwable exc, String attachment, InputStream inputStream) {
+                                    public Map<String, Object> failed(Throwable exc, String attachment, InputStream inputStream) {
                                         System.out.println(attachment + ": " + exc);
+                                        resultMap.put("result", exc.getMessage());
+                                        resultMap.put("file_path_local", attachment);
+                                        resultMap.put("file_path_s3", s3LocationF);
                                         try {
                                             inputStream.close();
                                         } catch (IOException ex) {
                                             Logger.getLogger(ClamAVAsync.class.getName()).log(Level.SEVERE, null, ex);
                                         }
+                                        return resultMap;
                                     }
                                 });
                             } catch (IOException ex) {
@@ -316,7 +344,7 @@ public class ClamAVAsync implements AutoCloseable {
                 } catch (IOException ex) {
                     Logger.getLogger(ClamAVAsync.class.getName()).log(Level.SEVERE, null, ex);
                 }
-            }
+            }*/
         } catch (IOException ex) {
             Logger.getLogger(ClamAVAsync.class.getName()).log(Level.SEVERE, null, ex);
         }

@@ -16,10 +16,11 @@
 package io.sensesecure.clamav4j;
 
 import java.io.InputStream;
+import java.util.Map;
 
 public interface ClamAVAsyncCallback <A> {
     
-    void completed(String result, A attachment, InputStream inputStream);
-    
-    void failed(Throwable exc, A attachment, InputStream inputStream);
+    void completed(String result, A attachment, InputStream inputStream, String s3Location);
+
+    void failed(Throwable exc, A attachment, InputStream inputStream, String s3Location);
 }
