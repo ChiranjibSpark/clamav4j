@@ -84,7 +84,7 @@ public class ClamAV {
             if (PONG.equals(status)) {
                 return true;
             }
-        } catch (IOException ex) {
+        } catch (Exception ex) {
             Logger.getLogger(ClamAV.class.getName()).log(Level.SEVERE, null, ex);
         }
         return false;
